@@ -149,6 +149,11 @@ and releasing a shared ephemeral port.
 same temp directory, and game detection walked up and found the game. Give each case its own
 `tempfile::tempdir()`.
 
+**Tests that share a process-wide value.** The start guard keeps its mark's lock in a `static`;
+one test's `opened()` emptied it while another test was between `begin` and its check, so
+`main` failed now and then although the PR's own run had passed. Tests that touch the same
+`static` take a shared test lock, even when each uses its own temp folder.
+
 **A mock server closed on a partial request.** A loopback fixture read a request only once, then
 replied and closed. TCP can split even a short header; unread bytes made that close reset the
 connection. Consume the complete header before replying, with a size cap and an absolute deadline.
@@ -192,6 +197,12 @@ project placement, the selected virtualenv interpreter and artifact paths stayed
 PATH lookup can return a relative path too. Resolve workspace paths against the process's
 current directory, look up only bare program names, and make the result absolute without
 dereferencing the virtualenv symlink. Test the generated capture request without opening a GUI.
+
+**A screenshot helper aborted inside CoreGraphics.** The first macOS screenshot probe used
+ScreenCaptureKit from a command-line Swift helper without initializing AppKit's WindowServer
+connection. An owned-window capture aborted in `CGS_REQUIRE_INIT`, while no-window regressions
+passed. Initialize `NSApplication.shared` on the main actor before capture, and verify an actual
+owned-window PNG as well as missing-window errors.
 
 **A model catalogue queried in the wrong project.** OpenCode V2's raw `api get /api/model` does
 not reliably select the invoking CLI's directory. Use the `model.list` operation with an explicit
@@ -671,6 +682,14 @@ Test the next serialized request as well as whether a tool ran.
 builder loop saved the reset only after a successful turn. A failed or cancelled turn had already
 removed the note, so reopening kept the old unchanged-turn count. Persist deferred request state
 on terminal errors too, outside provider retries; keep the original outcome if that save also fails.
+
+**Context added to the message but not the note.** "Just ask" answers were prepended to the
+builder's next message, but a note can reach a builder through its tool hook before any message,
+so the note carried the request without what it referred to. Put shared context where every path
+reads it (the note's hand-over file and the after-turn prompt), not in one delivery path, and test
+the fast path (hook) and the fallback (after the turn) separately. Mark it told only when the note
+is actually read or sent, never when it is written; and keep a note's raw text so a later run can
+filter answers by its own mode.
 
 **Lower-casing a command, then comparing its paths.** Auto mode lower-cased a shell command to
 match keywords, then checked its paths against the project folder with that same text; Windows

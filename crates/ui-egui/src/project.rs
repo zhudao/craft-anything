@@ -154,6 +154,7 @@ impl CraftApp {
             kinds: self.kinds.clone(),
             max_rounds: build.max_rounds,
             good_enough: build.good_enough,
+            clean_room: Some(!self.settings.deep_mode),
             ..RunOptions::default()
         }
     }

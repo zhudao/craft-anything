@@ -77,7 +77,7 @@ impl BackendKind {
             BackendKind::Openrouter => openai::OPENROUTER_MODELS,
             BackendKind::Gemini => openai::GEMINI_MODELS,
             BackendKind::OpenaiCompatible => &[],
-            BackendKind::AgentCli => &["claude-code", "codex", "copilot", "grok", "gemini-cli", "opencode", "antigravity", "hermes", "maki", "dsh"],
+            BackendKind::AgentCli => &["claude-code", "codex", "copilot", "grok", "gemini-cli", "opencode", "antigravity", "hermes", "maki", "aider", "dsh"],
         }
     }
 
@@ -131,6 +131,12 @@ fn go_env_key(base: &str) -> Option<String> {
         return None;
     }
     ["OPENCODEGO_API_KEY", "OPENCODE_GO_API_KEY"].iter().filter_map(|v| std::env::var(v).ok()).find(|k| !k.trim().is_empty())
+}
+
+/// How long an API backend's streamed answer may take: its `timeout_secs`, else one hour. A slow
+/// local model can need hours for a long answer (#1096); 0 is not a limit anyone means.
+fn stream_limit(options: &BackendOptions) -> std::time::Duration {
+    options.timeout_secs.filter(|s| *s > 0).map_or(http::STREAM_BODY, std::time::Duration::from_secs)
 }
 
 /// An OpenAI-compatible client, carrying OpenCode Go's session header when the base is its own.
@@ -474,7 +480,8 @@ impl AiHub {
 
     /// Add an OpenAI-compatible server by its address: Ollama or LM Studio on another computer, or
     /// a hosted service with its key. It's added only when it answers with its models; without a
-    /// model, the first one it lists that can chat is used. Returns the model.
+    /// model, the first one it lists that can chat is used. Returns the model. Anthropic's own
+    /// address is added as an Anthropic backend, as its API isn't OpenAI's.
     pub fn add_server(&self, name: &str, address: &str, model: Option<&str>, key: Option<String>) -> Result<String, ToolError> {
         let name = name.trim();
         let address = address.trim().trim_end_matches('/');
@@ -486,9 +493,15 @@ impl AiHub {
                 .with_remediation("Give the server's address, like http://192.168.1.20:11434/v1."));
         }
         let key = key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty());
-        // OpenCode Go lists its models at /v1, not under the chat path a person would paste.
-        let probe = if openai::is_opencode_go(address) { opencode_go_models_base(address) } else { address.to_string() };
-        let models = openai::OpenAi::compatible(name, &probe, key.clone(), "").list_models(Duration::from_secs(10)).map_err(|e| {
+        let kind = if anthropic::is_anthropic_api(address) { BackendKind::Anthropic } else { BackendKind::OpenaiCompatible };
+        let listed = if kind == BackendKind::Anthropic {
+            anthropic::Anthropic::new(Some(address), key.clone().unwrap_or_default(), "").list_models(Duration::from_secs(10))
+        } else {
+            // OpenCode Go lists its models at /v1, not under the chat path a person would paste.
+            let probe = if openai::is_opencode_go(address) { opencode_go_models_base(address) } else { address.to_string() };
+            openai::OpenAi::compatible(name, &probe, key.clone(), "").list_models(Duration::from_secs(10))
+        };
+        let models = listed.map_err(|e| {
             let why = e.message.clone();
             e.with_remediation(format!(
                 "Check the address (it usually ends in /v1), that the server is running and can be reached from this computer, and its key if it needs one. ({why})"
@@ -502,14 +515,7 @@ impl AiHub {
                     .with_remediation("Load a chat model on the server first, or enter the name of a chat model you know is available.")
             })?,
         };
-        let config = BackendConfig {
-            name: name.to_string(),
-            kind: BackendKind::OpenaiCompatible,
-            model: model.clone(),
-            base_url: Some(address.to_string()),
-            ssh_host: None,
-            enabled: true,
-        };
+        let config = BackendConfig { name: name.to_string(), kind, model: model.clone(), base_url: Some(address.to_string()), ssh_host: None, enabled: true };
         self.add_backend(config, key)?;
         Ok(model)
     }
@@ -808,21 +814,27 @@ impl AiHub {
         // nothing and gets the small context budget; a remote OpenAI-compatible service has a
         // large context and a bill, as any other cloud API (#374).
         let local = c.kind == BackendKind::OpenaiCompatible && base.is_none_or(detect::on_this_network);
+        let limit = stream_limit(&e.options);
+        let with_limit = |mut o: openai::OpenAi| {
+            o.stream_limit = limit;
+            Box::new(o) as Box<dyn ChatModel>
+        };
         let model: Box<dyn ChatModel> = match c.kind {
             BackendKind::Anthropic => {
                 let mut a = anthropic::Anthropic::new(base, self.key_for(e)?, &c.model);
                 a.fallbacks = e.options.fallbacks_enabled.unwrap_or(true);
+                a.stream_limit = limit;
                 Box::new(a)
             }
-            BackendKind::Openai => Box::new(openai::OpenAi::official(base, self.key_for(e)?, &c.model)),
-            BackendKind::Openrouter => Box::new(openai::OpenAi::openrouter(base, self.key_for(e)?, &c.model)),
-            BackendKind::Gemini => Box::new(openai::OpenAi::gemini(base, self.key_for(e)?, &c.model)),
+            BackendKind::Openai => with_limit(openai::OpenAi::official(base, self.key_for(e)?, &c.model)),
+            BackendKind::Openrouter => with_limit(openai::OpenAi::openrouter(base, self.key_for(e)?, &c.model)),
+            BackendKind::Gemini => with_limit(openai::OpenAi::gemini(base, self.key_for(e)?, &c.model)),
             BackendKind::OpenaiCompatible => {
                 let base = base.unwrap_or("http://127.0.0.1:11434/v1");
                 let key = self.keys.get(&c.name).or_else(|| go_env_key(base).or_else(|| providers::env_key(base)));
                 let mut o = compatible_client(&c.name, base, key, &c.model, &self.session_id());
                 o.react = e.options.react_fallback.unwrap_or(false);
-                Box::new(o)
+                with_limit(o)
             }
             BackendKind::AgentCli => return Err(ToolError::invalid(format!("{} is an agent app, not an API backend.", c.name))),
         };
@@ -874,10 +886,10 @@ impl AiHub {
     /// A builder conversation on an API backend: our agent loop with the Build toolset (files and
     /// commands in the project) enabled from the start, and room for a long build. In Deep mode
     /// every toolset is enabled, so it can look inside the original with all of them.
-    /// `transcript`: where the conversation is kept, and resumed from when it's there.
-    pub fn start_builder(&self, entry: &BackendEntry, beginner: bool, transcript: Option<PathBuf>) -> Result<ApiConversation, ToolError> {
+    /// `transcript`: where the conversation is kept, and resumed from when it's there. `deep` is
+    /// the run's mode, given by the caller: a tool that starts a build holds the session (#1102).
+    pub fn start_builder(&self, entry: &BackendEntry, beginner: bool, transcript: Option<PathBuf>, deep: bool) -> Result<ApiConversation, ToolError> {
         use craft_anything_engine::Toolset;
-        let deep = !self.engine.session().clean_room();
         let toolsets = if deep { self.engine.registry().toolsets() } else { vec![Toolset::Core, Toolset::Build] };
         self.start_loop(entry, beginner, transcript, &toolsets, true)
     }
@@ -970,7 +982,7 @@ impl AiHub {
                 latency_ms: start.elapsed().as_millis() as u64,
                 reply: out.stdout_text().lines().next().unwrap_or_default().trim().to_string(),
                 version_only: true,
-                saved_program_replaced: e.options.command.as_deref().map(str::trim).filter(|c| !c.is_empty() && *c != program).map(str::to_string),
+                saved_program_replaced: crate::cli_agents::replaced_program(&e.options, &program),
                 program: Some(program),
             });
         }

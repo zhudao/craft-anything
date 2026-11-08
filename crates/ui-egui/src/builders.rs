@@ -6,6 +6,7 @@ use crate::i18n::{tr, trf};
 use crate::state::Modal;
 use crate::theme::{self, Tokens};
 use crate::{CraftApp, icons, widgets};
+use craft_anything_ai::rebuild::replaced_builder_notice;
 use craft_anything_ai::{BackendConfig, BackendKind};
 use egui::{RichText, Ui, Vec2};
 
@@ -103,12 +104,6 @@ fn detail(b: &BackendConfig) -> String {
         k if b.model.is_empty() => tr(k.title()),
         k => format!("{} · {}", tr(k.title()), b.model),
     }
-}
-
-/// The notice when a project's saved AI was turned off or removed. English for now: the wording
-/// needs a native speaker's check before it joins the catalogs.
-fn replaced_builder_notice(saved: &str, used: &str) -> String {
-    format!("The AI chosen for this project ({saved}) is turned off or no longer set up. {used} builds instead.")
 }
 
 impl CraftApp {

@@ -50,6 +50,7 @@ pub const KNOWN: &[(&str, &str, &str)] = &[
     ("qwen-code", "qwen", "Qwen Code"),
     ("goose", "goose", "Goose"),
     ("maki", "maki", "Maki"),
+    ("aider", "aider", "Aider"),
     ("dsh", "dsh", "DeepSeek Harness"),
 ];
 
@@ -65,6 +66,13 @@ pub fn program_for(agent: &str) -> String {
 /// the Claude desktop app, which can't build.
 pub fn program_of(config: &BackendConfig, options: &BackendOptions) -> Result<String, ToolError> {
     program_in(config, options, craft_anything_platform::which::search_path())
+}
+
+/// The saved program path `program` stands in for, when [`program_of`] chose another one (#721).
+/// A bare name (`claude.exe`) found as the same agent elsewhere isn't a replacement.
+pub fn replaced_program(options: &BackendOptions, program: &str) -> Option<String> {
+    let saved = options.command.as_deref().map(str::trim).filter(|c| !c.is_empty() && *c != program)?;
+    Path::new(saved).parent().is_some_and(|p| !p.as_os_str().is_empty()).then(|| saved.to_string())
 }
 
 fn program_in(config: &BackendConfig, options: &BackendOptions, search: Option<std::ffi::OsString>) -> Result<String, ToolError> {
@@ -1221,6 +1229,12 @@ mod tests {
         let chosen = |p: &Path| BackendOptions { command: Some(p.display().to_string()), ..Default::default() };
         assert_eq!(program_of(&config(None), &chosen(&gone)).unwrap(), new.display().to_string(), "the same file in the newer build folder");
         assert_eq!(program_of(&config(None), &chosen(&new)).unwrap(), new.display().to_string(), "a path that's there is used as it is");
+        let program = program_of(&config(None), &chosen(&gone)).unwrap();
+        assert_eq!(replaced_program(&chosen(&gone), &program), Some(gone.display().to_string()), "the gone path is named");
+        assert_eq!(replaced_program(&chosen(&new), &new.display().to_string()), None, "nothing replaced");
+        assert_eq!(replaced_program(&BackendOptions::default(), "codex"), None, "nothing saved");
+        let bare = BackendOptions { command: Some("claude.exe".into()), ..Default::default() };
+        assert_eq!(replaced_program(&bare, "claude"), None, "a bare name found as the same agent");
         assert_eq!(program_of(&config(Some("box")), &chosen(&gone)).unwrap(), gone.display().to_string(), "another computer's path isn't checked here");
         assert_eq!(program_of(&config(None), &BackendOptions::default()).unwrap(), "codex", "nothing chosen: the usual name");
         // #467: a saved app bundle is never started; the usual name is looked up instead.
@@ -1628,7 +1642,7 @@ mod tests {
         let g = build_args(adapter_for("gemini-cli").as_ref(), &BackendOptions::default(), "q", "", &mcp(), None, Access::Analyse);
         assert!(g.windows(2).any(|w| w[0] == "--output-format" && w[1] == "stream-json"));
         let o = BackendOptions { args: vec!["run".into()], ..Default::default() };
-        assert_eq!(build_args(adapter_for("aider").as_ref(), &o, "q", "", &mcp(), None, Access::Analyse), vec!["run".to_string(), "q".to_string()]);
+        assert_eq!(build_args(adapter_for("no-such-agent").as_ref(), &o, "q", "", &mcp(), None, Access::Analyse), vec!["run".to_string(), "q".to_string()]);
     }
 
     #[test]
@@ -2424,8 +2438,11 @@ echo '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'
     /// Agents that are never handed the tool server build without the helper.
     #[test]
     fn only_agents_handed_the_tool_server_need_the_helper() {
-        for agent in ["gemini-cli", "aider", "no-such-agent"] {
-            assert!(check_builder_tools(adapter_for(agent).as_ref(), agent, &BackendOptions::default(), &CancelToken::default()).is_ok(), "{agent}");
+        // Aider is handed no tool server, so it needs no helper; it still needs a model or key
+        // before it runs (#72), which its own tests cover.
+        let aider = BackendOptions { cli_model: Some("anthropic/claude-sonnet-4".into()), ..Default::default() };
+        for (agent, options) in [("gemini-cli", BackendOptions::default()), ("aider", aider), ("no-such-agent", BackendOptions::default())] {
+            assert!(check_builder_tools(adapter_for(agent).as_ref(), agent, &options, &CancelToken::default()).is_ok(), "{agent}");
         }
     }
 
@@ -2497,13 +2514,13 @@ echo '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'
         let mut p = StreamParser::new(echo);
         assert!(matches!(p.line(r#"{"say":"hello"}"#).as_slice(), [AgentEvent::TextDelta { text }] if text == "hello"));
         // Unknown agents stream their output as text; the built-ins keep their own adapters.
-        assert!(!reg.for_agent("aider").streams_json());
+        assert!(!reg.for_agent("no-such-agent").streams_json());
         assert!(reg.for_agent("claude").resumes() && !reg.for_agent("codex").resumes() && reg.for_agent("antigravity").resumes());
         // Registering an adapter for an existing id replaces that one.
         reg.register(Arc::new(EchoAgent));
         assert_eq!(
             format!("{reg:?}"),
-            r#"["claude-code", "codex", "gemini-cli", "opencode", "antigravity", "hermes", "maki", "copilot", "grok", "dsh", "echo-agent"]"#
+            r#"["claude-code", "codex", "gemini-cli", "opencode", "antigravity", "hermes", "maki", "aider", "copilot", "grok", "dsh", "echo-agent"]"#
         );
     }
 

@@ -35,14 +35,19 @@ pub const OPENCODE_GO_DEFAULT_MODEL: &str = "kimi-k3.1-pro";
 /// Whether this base URL is OpenCode Go's: https, host opencode.ai, path under /inference/go/.
 /// A substring test would also match a look-alike host or a proxy path.
 pub fn is_opencode_go(base: &str) -> bool {
+    https_host_path(base).is_some_and(|(host, path)| host.eq_ignore_ascii_case("opencode.ai") && (path == "inference/go" || path.starts_with("inference/go/")))
+}
+
+/// An https address's host (without user or port) and path; `None` for any other scheme.
+pub(crate) fn https_host_path(base: &str) -> Option<(&str, &str)> {
     let base = base.trim().trim_end_matches('/');
-    let Some((scheme, rest)) = base.split_once("://") else { return false };
+    let (scheme, rest) = base.split_once("://")?;
     if !scheme.eq_ignore_ascii_case("https") {
-        return false;
+        return None;
     }
     let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
     let host = host.rsplit('@').next().unwrap_or(host).split(':').next().unwrap_or(host);
-    host.eq_ignore_ascii_case("opencode.ai") && (path == "inference/go" || path.starts_with("inference/go/"))
+    Some((host, path))
 }
 
 /// Well-known local servers: (name, base URL).
@@ -67,6 +72,8 @@ pub struct OpenAi {
     pub auto_react: bool,
     /// Talking to OpenRouter, which routes each request to one of several upstream providers.
     pub openrouter: bool,
+    /// How long one streamed answer may take (a slow local model can need hours).
+    pub stream_limit: std::time::Duration,
 }
 
 impl OpenAi {
@@ -96,6 +103,7 @@ impl OpenAi {
             react: false,
             auto_react: true,
             openrouter: false,
+            stream_limit: http::STREAM_BODY,
         }
     }
 
@@ -192,7 +200,7 @@ impl OpenAi {
     }
 
     fn stream_once(&self, req: &TurnRequest<'_>, on_delta: &mut dyn FnMut(Delta), stop: &Stop) -> Result<TurnResult, ToolError> {
-        let agent = http::stream_agent();
+        let agent = http::stream_agent(self.stream_limit);
         let reader = http::post_json(&agent, &self.label, &self.url("chat/completions"), &self.headers(), &self.body(req))?;
         let mut st = ChatStream::default();
         http::parse_sse(reader, |ev| {

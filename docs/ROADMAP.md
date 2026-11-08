@@ -235,9 +235,12 @@ only when it's green and a maintainer has fully reviewed it, code as well as wor
       — claimed: SoldierPePe, branch test/r5.2-console-capture-flake
 - [ ] A console program that exits by itself and leaves programs attached to its console: closing
       it can still hang the console host on Windows Server 2022 (only a timeout ends the tree)
-- [ ] `process::launch_tests::a_watched_program_can_be_stopped` leaves its `sleep 30` (Windows:
+- [x] `process::launch_tests::a_watched_program_can_be_stopped` leaves its `sleep 30` (Windows:
       `ping -n 30`) running, on `main` too: `stop` ends the shell but not what the shell started
-      — in PR #1027
+      (#1027). Verified on Windows 11: after the test (5 runs) and after the whole
+      `craft-anything-platform` suite plus a 35 s wait, `tasklist` showed no `PING.EXE`. Not
+      checked: a panic before `stop`, dropping the handle without `stop`, Windows 10 or Server
+      — claimed: yashpatadiya1724-cmyk, branch docs/r5.2-watched-stop-windows-check
 - [x] `a_helper_is_judged_by_whether_it_runs` (ai crate) sometimes failed when several crates'
       tests ran at once: a script just written can't start while another thread's child still
       holds it open ("Text file busy"). #787 tries again: on Linux 4 of 72 runs failed before
@@ -446,9 +449,10 @@ Owner: open · Status: todo
       reporting that the chosen AI was replaced. The Make picker says so in a toast, and every
       start (Start, Continue, a note, Try again) names the saved AI and the one building instead
       — claimed: AlexJoaquimPereira, branch `bugfix/r5.5-stale-builder-notice`
-- [ ] `rebuild --continue-in`, `rebuild_start` on a project and `rebuild_question_ask` still use
-      the default AI when the saved builder is off or gone, and say nothing: report the replacement
-      there too
+- [x] `rebuild --continue-in`, `rebuild_start` on a project and `rebuild_question_ask` name the
+      saved builder that is off or gone and the AI building instead: the CLI prints it before the
+      run, `rebuild_start` adds `builder_notice`, and an answered question carries it
+      — claimed: AlexJoaquimPereira, branch `bugfix/r5.5-headless-builder-notice`
 - [ ] The saved-builder replacement notice is English only for now; add it to the catalogs after a
       native speaker checks the wording
 - [x] Bound accumulated data across all lines of one server-sent event, so short lines cannot
@@ -484,8 +488,15 @@ Owner: open · Status: todo
 Golden rule 3: the result is evidence. Each fix needs a Mac to test on.
 - [x] macOS: a denied Accessibility permission is reported as success with an empty tree (#240)
       — claimed: mavericzz, branch bugfix/r5.6-accessibility-denied; PR #887
-- [ ] macOS: `runtime_ui_read` ignores `screenshot` (#248): the Swift helper declares it but
-      never captures an image
+- [x] macOS: `runtime_ui_read` captures a requested screenshot (#248): one on-screen window
+      belonging to the pid, restricted by `window_id` when supplied; PNG/base64 up to 2048 px
+      per side. Combined JSON (including escaping and the newline) stays within 16 MiB by
+      trimming the tree with explicit truncation and partial coverage, preserving the image.
+      Missing Screen Recording permission, a missing window or a capture failure produces
+      an explicit screenshot limitation and partial evidence. Denied Accessibility permission with
+      the tree enabled (the default) returns a tool error before capture; `accessibility: false`
+      skips the tree. Requires macOS 14+ and existing Screen Recording permission; opens no dialog
+      — claimed: Codex, branch bugfix/r5.6-macos-screenshot
 - [x] macOS: `runtime_ui_read` honours `accessibility: false` (#307): the Swift helper skips
       the tree and its permission check, returns no nodes without truncation, and the evidence
       records the flag and says the tree was skipped. Walkthroughs still require Accessibility
@@ -605,6 +616,8 @@ Owner: open · Status: in progress
 - [ ] Settings says when a saved agent program is gone and which one runs in its place; today a
       build moves to the newest build folder or the usual program without saying so, and the
       setting keeps the old path (read on a worker, not while drawing) (#721)
+- [x] A build says in its feed when it runs another program than the one saved in Settings → AI
+      (#721) — claimed: Agapenordev, branch bugfix/r2.2-build-says-replaced-program
 - [x] GitHub Copilot through its own CLI login and ACP, without credential import:
       discovery, MCP-only tool restrictions, model selection and fresh read-only questions;
       unit tests and CLI 1.0.105 with an isolated home and loopback model, all five access modes
@@ -694,7 +707,12 @@ Owner: open · Status: in progress
       default once that passes
 - [x] Aider has no adapter, so the plain one hands it the prompt as a file name, and it can open a
       browser sign-in nobody agreed to (#72). Give it an adapter, or stop offering it — claimed: Afloat16, branch bugfix/r2.2-aider-recommendations-20261103
-- [ ] Add a non-interactive Aider adapter before recommending it again; detection currently leaves it out.
+- [x] Add a non-interactive Aider adapter before recommending it again; detection currently leaves it out.
+      Aider gets the message with `--message`, and flags that stop it asking, updating, editing
+      `.gitignore` or opening a page; a chat outside a build also gets `--dry-run`. Before a run it
+      refuses when no model or key is set up, or an OpenRouter model has no OpenRouter key: both
+      would offer a sign-in and wait for a browser nobody is at (#72).
+      — claimed: hasnain607, branch feature/r2.2-aider-adapter
 - [ ] Codex (#499): in a chat the tool server has no active target. The reporter attached a patch
       for chat continuity; look at that first
 - [x] Codex (#538): list every permitted tool from startup, since Codex doesn't refresh its callable
@@ -704,6 +722,7 @@ Owner: open · Status: in progress
       code) and a refusal explains the fix (`docs/codex.md`)
 - [ ] Codex (#540): run `codex exec` on a real install and check `rebuild_start` gets through
 - [ ] Codex: resume support (`codex exec resume <id>`), verified on a real install
+- [ ] Aider: move the message to `--message-file` once the launcher can write one (see the argv item above), and read project-folder `.aider.conf.yml` and `.env` in `check_setup`, which needs the working directory passed into `check_native_options`.
 - [ ] Every adapter but Claude Code's still takes the message in argv (`prompt_on_stdin`), so a long
       one can pass Windows' command-line limit as Claude Code's did (#402); hand each its message on
       stdin or in a file where its CLI reads one
@@ -866,14 +885,17 @@ Owner: open · Status: in progress
       from the same process that supplied the picture, without falling back to unrelated names — PR #950
 - [x] Shared toolchain commands make project-local executables absolute before changing the
       working directory, preserving virtualenv paths for relative project placements — PR #950
-- [ ] Extend launch recipes beyond conventional root entrypoints: Python package scripts, Go
-      `cmd/` layouts, and Java build outputs; build checks already use their toolchain commands
+- [x] Launch a Go project with one `cmd/<name>/main.go` as a package when the root has no
+      `main.go` — claimed: Afloat16, branch feature/r2.7-go-command-layouts
+- [ ] Extend launch recipes to Python package scripts and Java build outputs; build checks already
+      use their toolchain commands
 - [ ] Audit relative project placements in build, option-run and Play paths too: runtime window
       capture now normalizes its request paths, but earlier runner paths can still be relative
 - [x] "player" alone doesn't make a request a game: a video or music player is an app (#953)
       — claimed: justinjohn0306, branch bugfix/953-player-not-a-game
-- [ ] Game words can't tell these apart from games: "a low level disk tool", "an MPEG 2 player",
-      "a single player app for movies". Telling them apart needs more than a list of words
+- [x] System-tool and media-player phrases keep the app target: "a low level disk tool",
+      "an MPEG 2 player" and "a single player app for movies". Independent game cues still apply
+      — claimed: Afloat16, branch bugfix/r2.7-media-and-system-apps
 
 ### R2.8 Clean room means clean room
 Owner: maintainers · Status: in progress
@@ -935,7 +957,10 @@ Gaps found while using the app for real projects.
 - [x] "Change it" knows what was just talked about in "Just ask": the next message tells the builder
       the latest few questions and answers, once, and a Clean room build only those asked in Clean
       room (#857). Not checked in a live build
-- [ ] A note sent while a build is running doesn't tell it what was asked in "Just ask" yet (#857)
+- [x] A note sent while a build is running tells it what was asked in "Just ask" (#857): the
+      note's hand-over file carries the answers, and the after-turn path puts them before the
+      notes; only answers the run's mode may show, marked told when read or sent
+      — claimed: AlexJoaquimPereira, branch bugfix/r2.9-note-just-ask; commit 78d3963
 - [ ] Record which mode a builder's session ran in: `agent_session` is kept across modes, so a Clean
       room build or question can resume a session from a Deep build and carry what it read, and such
       a question's answer is recorded as asked in Clean room. Don't resume one for Clean room
@@ -1072,8 +1097,9 @@ Owner: open · Status: todo
 ### R3.9 Game assets out
 Owner: open · Status: in progress
 - [ ] Unity: sounds out (the stored stream, usually FSB5; PCM ones as WAV)
-- [ ] Unity: crunched textures (DXT1Crunched, DXT5Crunched; two of the games checked use them) and
-      the float formats (RHalf, RGHalf, RGBAHalf, RFloat, RGFloat, RGBAFloat)
+- [ ] Unity: crunched textures (DXT1Crunched, DXT5Crunched; two of the games checked use them)
+- [x] Unity: the float formats (RHalf, RGHalf, RGBAHalf, RFloat, RGFloat, RGBAFloat)
+      — claimed: Afloat16, branch feature/r3.9-unity-float-textures
 - [ ] Unreal 5 and Oodle: IoStore packages, unversioned properties and Oodle-compressed paks
 - [ ] Game files: save pictures from IoStore containers (needs the Unreal 5 support above)
 - [ ] Unreal: sounds and meshes out (so a Deep-mode rebuild needs no outside converter for them)
@@ -1145,6 +1171,8 @@ Owner: open · Status: in progress
 - [x] Reject incomplete simple packet block payloads.
       — claimed: Afloat16, branch bugfix/r3.12-pcapng-simple-block-length-20261105
       Count rejected lengths against the packet scan limit and summarize them once at the end of the walk.
+- [x] Bound rejected packet records, validate timestamp fractions and check pcapng section-local interfaces.
+      — claimed: Afloat16, branch bugfix/r3.12-capture-timing-framing
 - [x] Keep ZIP directory entries within the declared directory.
       — claimed: Afloat16, branch bugfix/r3.12-zip-directory-bounds-20261105
 - [x] Refuse split ZIP archives without their other volumes.
@@ -1209,6 +1237,8 @@ Owner: open · Status: in progress
       ROMFS dot roots, cramfs, ext and JFFS2 sizes and holes, PyInstaller modules outside their
       PYZ, JSON config edits (comments kept, every duplicate key removed), and UDP, TCP, DNS over
       TCP, pcapng and TLS lengths (#688–#715, by Afloat16)
+- [x] Check ClientHello vector lengths and extension values before reporting the handshake as complete.
+      — claimed: Afloat16, branch bugfix/r3.12-tls-client-hello-values
 
 - [x] Address the combined parser review: preserve partial Java reference coverage,
       enforce DEX signed 32-bit LEB128 limits, recover legacy AAPT UTF-8 lengths within
@@ -1222,6 +1252,8 @@ Owner: open · Status: in progress
       exchanges, and report malformed records as incomplete instead of inventing answer values,
       while preserving legal empty DNS UPDATE RRset prerequisites
       — claimed: Afloat16, branch bugfix/r3.12-dns-rdata-names-review-20261104
+- [x] Keep address and service records attached to their owner and validate the record's wire fields.
+      — claimed: Afloat16, branch bugfix/r3.12-dns-record-evidence
 
 ### R3.13 Web inspection correctness
 Owner: open · Status: in progress
