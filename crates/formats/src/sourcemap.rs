@@ -33,6 +33,8 @@ pub enum SourceMapError {
     BadVersion,
     #[error("source map mappings are malformed at segment {0}")]
     BadMappings(usize),
+    #[error("source map index has invalid sections")]
+    BadSections,
     #[error("source map has more than {0} segments")]
     TooManySegments(usize),
     #[error("source map sections nest deeper than {0}")]
@@ -176,18 +178,25 @@ fn from_value(v: &Value, depth: usize, limits: Limits, budget: &mut usize) -> Re
             .unwrap_or_default(),
         ..Default::default()
     };
-    if let Some(sections) = v.get("sections").and_then(Value::as_array) {
-        for s in sections {
-            let line = s.pointer("/offset/line").and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok()).unwrap_or(0);
-            let col = s.pointer("/offset/column").and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok()).unwrap_or(0);
-            // Only inline maps; a `url` section would need a fetch, which a parser never does.
-            if let Some(m) = s.get("map") {
-                let sub = from_value(m, depth + 1, limits, budget)?;
-                map.segments = map.segments.saturating_add(sub.segments);
-                map.sections.push((line, col, sub));
+    if let Some(sections) = v.get("sections") {
+        let sections = sections.as_array().ok_or(SourceMapError::BadSections)?;
+        for section in sections {
+            let offset = |key: &str| section.get("offset")?.get(key)?.as_u64().and_then(|n| u32::try_from(n).ok());
+            let line = offset("line").ok_or(SourceMapError::BadSections)?;
+            let col = offset("column").ok_or(SourceMapError::BadSections)?;
+            if map.sections.last().is_some_and(|(l, c, _)| (*l, *c) > (line, col)) {
+                return Err(SourceMapError::BadSections);
             }
+            let sub = match (section.get("map"), section.get("url")) {
+                (Some(m), None) => from_value(m, depth + 1, limits, budget)?,
+                // External maps are never fetched here. Retain their start so a lookup
+                // cannot leak through to the previous inline map.
+                (None, Some(Value::String(_))) => SourceMap::default(),
+                _ => return Err(SourceMapError::BadSections),
+            };
+            map.segments = map.segments.saturating_add(sub.segments);
+            map.sections.push((line, col, sub));
         }
-        map.sections.sort_by_key(|(l, c, _)| (*l, *c));
         return Ok(map);
     }
     let mappings = v.get("mappings").and_then(Value::as_str).unwrap_or_default();
@@ -295,7 +304,11 @@ pub fn find_source_mapping_url(js: &str) -> Option<String> {
 
 /// Decode a `data:` URL, including percent escapes and optional base64 content.
 pub fn decode_data_url(url: &str) -> Option<Vec<u8>> {
-    let rest = url.strip_prefix("data:")?;
+    let (scheme, rest) = url.split_once(':')?;
+    if !scheme.eq_ignore_ascii_case("data") {
+        return None;
+    }
+    let rest = rest.split_once('#').map_or(rest, |(body, _)| body);
     let (meta, payload) = rest.split_once(',')?;
     let decoded: std::borrow::Cow<'_, [u8]> = if payload.contains('%') {
         let hex = |b: u8| match b {
@@ -313,7 +326,11 @@ pub fn decode_data_url(url: &str) -> Option<Vec<u8>> {
     } else {
         std::borrow::Cow::Borrowed(payload.as_bytes())
     };
-    if meta.ends_with(";base64") { base64_decode(std::str::from_utf8(&decoded).ok()?) } else { Some(decoded.into_owned()) }
+    if meta.rsplit_once(';').is_some_and(|(_, flag)| flag.trim_matches(|c: char| c.is_ascii_whitespace()).eq_ignore_ascii_case("base64")) {
+        base64_decode(std::str::from_utf8(&decoded).ok()?)
+    } else {
+        Some(decoded.into_owned())
+    }
 }
 
 /// Standard or URL-safe base64, padding optional. `None` on any invalid character.
@@ -344,11 +361,51 @@ mod tests {
     }
 
     #[test]
+    fn data_url_fragments_are_not_part_of_the_source_map() {
+        assert_eq!(decode_data_url("DATA:application/json;BASE64,e30=#section"), Some(b"{}".to_vec()));
+        assert_eq!(decode_data_url("data:text/plain,one%23two#ignored%"), Some(b"one#two".to_vec()));
+        assert_eq!(decode_data_url("data:,body?query#fragment"), Some(b"body?query".to_vec()));
+        assert!(decode_data_url("http:,payload").is_none());
+    }
+
+    #[test]
     fn indexed_maps() {
         let m = br#"{"version":3,"sections":[{"offset":{"line":0,"column":0},"map":{"version":3,"sources":["a.js"],"names":[],"mappings":"AAAA"}},{"offset":{"line":1,"column":0},"map":{"version":3,"sources":["b.js"],"names":[],"mappings":"AAAA"}}]}"#;
         let map = parse(m, Limits::default()).unwrap();
         assert_eq!(map.original_positions(1, 3)[0].source.as_deref(), Some("b.js"));
         assert_eq!(map.all_sources(), vec!["a.js", "b.js"]);
+    }
+
+    #[test]
+    fn validates_index_map_shape_and_offsets() {
+        let inline = serde_json::json!({"version":3,"mappings":"A"});
+        for sections in [
+            serde_json::json!({}),
+            serde_json::json!([{"map":inline}]),
+            serde_json::json!([{"offset":{"line":-1,"column":0},"map":inline}]),
+            serde_json::json!([{"offset":{"line":0,"column":4294967296_u64},"map":inline}]),
+            serde_json::json!([{"offset":{"line":0,"column":0}}]),
+            serde_json::json!([{"offset":{"line":0,"column":0},"map":inline,"url":"later.map"}]),
+            serde_json::json!([{"offset":{"line":0,"column":2},"map":inline},{"offset":{"line":0,"column":1},"map":inline}]),
+        ] {
+            let json = serde_json::json!({"version":3,"sections":sections}).to_string();
+            assert_eq!(parse(json.as_bytes(), Limits::default()), Err(SourceMapError::BadSections));
+        }
+    }
+
+    #[test]
+    fn an_external_section_ends_the_previous_inline_mapping() {
+        let inline = serde_json::json!({"version":3,"sources":["first.js"],"mappings":"AAAA"});
+        let sections = serde_json::json!([
+            {"offset":{"line":0,"column":0},"map":inline},
+            {"offset":{"line":0,"column":4},"url":"external.map"},
+            {"offset":{"line":1,"column":0},"map":inline}
+        ]);
+        let json = serde_json::json!({"version":3,"sections":sections}).to_string();
+        let map = parse(json.as_bytes(), Limits::default()).unwrap();
+        assert_eq!(map.original_positions(0, 3)[0].source.as_deref(), Some("first.js"));
+        assert!(map.original_positions(0, 4).is_empty());
+        assert_eq!(map.original_positions(1, 0)[0].generated_column, 0);
     }
 
     #[test]
